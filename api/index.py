@@ -1,6 +1,11 @@
 import os
+import sys
 import logging
 from fastapi import FastAPI, Request
+
+# Add the parent directory to sys.path so Vercel can find 'src'
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from aiogram import types
 from src.bot.bot import dp, bot
 from src.bot.handlers import router
