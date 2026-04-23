@@ -11,6 +11,7 @@ from diffusers import FluxPipeline
 from src.api.schemas import ScriptRequest, ScriptResponse, ImageRequest, ImageResponse, RenderRequest, RenderResponse, ScriptScene
 from src.api.config import settings
 import logging
+from pyngrok import ngrok
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -174,4 +175,18 @@ async def start_render(request: RenderRequest):
         raise HTTPException(status_code=500, detail=f"The editing room is on fire: {str(e)}")
 
 if __name__ == "__main__":
+    # Start ngrok tunnel if enabled
+    use_ngrok = os.getenv("USE_NGROK", "False").lower() == "true"
+    if use_ngrok:
+        port = 8000
+        authtoken = os.getenv("NGROK_AUTHTOKEN")
+        if authtoken:
+            ngrok.set_auth_token(authtoken)
+        
+        public_url = ngrok.connect(port).public_url
+        logger.info(f"🚀 NGROK Tunnel established at: {public_url}")
+        print(f"\n✨ PUBLIC URL: {public_url} ✨\n")
+        # Update settings dynamically for the session
+        settings.LOCAL_SERVER_URL = public_url
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
