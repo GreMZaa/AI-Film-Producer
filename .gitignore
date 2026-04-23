@@ -17,3 +17,7 @@ data/
 # IDE
 .vscode/
 .idea/
+
+# Tools
+scratch/busybox.exe
+
