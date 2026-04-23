@@ -25,8 +25,9 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# Ensure directories exist
-os.makedirs(settings.DATA_DIR, exist_ok=True)
-os.makedirs(settings.STORYBOARD_DIR, exist_ok=True)
-os.makedirs(settings.VIDEO_DIR, exist_ok=True)
-os.makedirs(settings.AUDIO_DIR, exist_ok=True)
+# Ensure directories exist (only if not on Vercel)
+if not os.environ.get("VERCEL"):
+    os.makedirs(settings.DATA_DIR, exist_ok=True)
+    os.makedirs(settings.STORYBOARD_DIR, exist_ok=True)
+    os.makedirs(settings.VIDEO_DIR, exist_ok=True)
+    os.makedirs(settings.AUDIO_DIR, exist_ok=True)
