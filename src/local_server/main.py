@@ -153,6 +153,14 @@ async def start_render(request: RenderRequest):
     try:
         from src.local_server.renderer import renderer
         
+        # Unload image pipe to free memory for video/audio
+        global image_pipe
+        if image_pipe is not None:
+            logger.info("Unloading image model for rendering...")
+            image_pipe = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
         # In a real scenario, we might want to run this in a background task
         # since it can take several minutes. For this indy-dev scale, we'll do it sync
         # or use BackgroundTasks.

@@ -1,0 +1,19 @@
+# Ignore GPU/Heavy folders for Vercel deployment
+src/local_server/
+dashboard/
+outputs/
+data/
+models/
+scratch/
+.venv/
+venv/
+*.mp4
+*.png
+*.jpg
+*.jpeg
+*.pth
+*.bin
+*.pt
+*.onnx
+requirements_gpu.txt
+docs/

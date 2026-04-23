@@ -7,7 +7,6 @@
       "config": { "runtime": "python3.12" }
     }
   ],
-  "installCommand": "pip install -r requirements_vercel.txt",
   "routes": [
     {
       "src": "/webhook",

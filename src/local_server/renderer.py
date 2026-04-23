@@ -6,6 +6,12 @@ from diffusers import StableVideoDiffusionPipeline
 from moviepy.editor import ImageClip, VideoFileClip, AudioFileClip, concatenate_videoclips, TextClip, CompositeVideoClip
 from src.api.config import settings
 from PIL import Image
+from pydub import AudioSegment
+import numpy as np
+try:
+    from TTS.api import TTS
+except ImportError:
+    TTS = None
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +19,8 @@ class MovieRenderer:
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.video_pipe = None
-        # TTS and Wav2Lip would be initialized here or loaded lazily
+        self.tts = None
+        # Models for Phase 4
 
     def load_video_model(self):
         if self.video_pipe is None:
@@ -24,8 +31,7 @@ class MovieRenderer:
                 variant="fp16" if self.device == "cuda" else None
             ).to(self.device)
             # Enable memory optimizations
-            if self.device == "cuda":
-                self.video_pipe.enable_model_cpu_offload()
+            self.video_pipe.enable_model_cpu_offload() # Better for low VRAM
             logger.info("SVD model loaded.")
 
     def generate_scene_video(self, image_path: str, scene_id: int):
@@ -72,12 +78,28 @@ class MovieRenderer:
         
         return output_path
 
+    def load_tts_model(self):
+        if self.tts is None and TTS is not None:
+            logger.info("Loading TTS model...")
+            # Using Bark for expressive voices
+            self.tts = TTS("tts_models/multilingual/multi-dataset/bark").to(self.device)
+            logger.info("TTS model loaded.")
+
     def generate_audio(self, text: str, scene_id: int):
-        """Phase 4.2: Generate audio using Bark (Simplified)"""
-        # Placeholder for full Bark implementation
-        # To keep it lightweight for now, we return None and use subtitles in assembly
-        logger.info(f"Audio requested for scene {scene_id}: {text}")
-        return None 
+        """Phase 4.2: Generate audio using Bark"""
+        self.load_tts_model()
+        if self.tts is None:
+            logger.warning("TTS library not installed. Skipping audio.")
+            return None
+            
+        output_path = os.path.join(settings.AUDIO_DIR, f"scene_{scene_id}_{uuid.uuid4().hex[:8]}.wav")
+        
+        logger.info(f"Generating audio for scene {scene_id}...")
+        # Bark supports voice presets. For a sarcastic producer, we might want a specific one.
+        # But for now, we'll use a default or let it be random.
+        self.tts.tts_to_file(text=text, file_path=output_path)
+        
+        return output_path
 
     def assemble_final_movie(self, scenes_data: list, user_id: int):
         """Phase 4.4: Combine everything with FFmpeg/MoviePy"""
@@ -87,21 +109,33 @@ class MovieRenderer:
         try:
             for scene in scenes_data:
                 # scene is a dict from RenderRequest
-                # We need local path from image_url
                 img_filename = os.path.basename(scene['image_url'])
                 local_image_path = os.path.join(settings.STORYBOARD_DIR, img_filename)
                 
+                # 1. Generate Audio
+                audio_path = None
+                if scene.get('dialogue') and scene['dialogue'].lower() != "silent":
+                    audio_path = self.generate_audio(scene['dialogue'], scene['scene_id'])
+                
+                # 2. Generate Video (Animation)
                 video_path = self.generate_scene_video(local_image_path, scene['scene_id'])
+                
+                # 3. Optional Lipsync (If weights exist)
+                # For now, we'll just use the raw video + audio
+                
                 clip = VideoFileClip(video_path)
                 
-                # Optional: Add dialogue as overlay
+                if audio_path:
+                    audio_clip = AudioFileClip(audio_path)
+                    if audio_clip.duration > clip.duration:
+                        clip = clip.loop(duration=audio_clip.duration)
+                    clip = clip.set_audio(audio_clip)
+                
+                # 4. Burn Subtitles (Fallback for ImageMagick)
                 if scene.get('dialogue') and scene['dialogue'].lower() != "silent":
-                    txt_clip = (TextClip(scene['dialogue'], fontsize=24, color='white', 
-                                       font='Arial', stroke_color='black', stroke_width=1)
-                               .set_duration(clip.duration)
-                               .set_position(('center', 'bottom'))
-                               .margin(bottom=20, opacity=0))
-                    clip = CompositeVideoClip([clip, txt_clip])
+                    # We create a simple black bar with text using a custom function
+                    # instead of TextClip which requires ImageMagick
+                    clip = self.add_subtitles_to_clip(clip, scene['dialogue'])
                     
                 clips.append(clip)
             
@@ -123,12 +157,53 @@ class MovieRenderer:
             output_filename = f"final_movie_{user_id}_{uuid.uuid4().hex[:8]}.mp4"
             output_path = os.path.join(settings.VIDEO_DIR, output_filename)
             
-            result.write_videofile(output_path, codec="libx264", audio=False) # Audio false until TTS ready
+            result.write_videofile(output_path, codec="libx264", audio_codec="aac") 
             
             return output_path
             
         except Exception as e:
             logger.error(f"Assembly failed: {str(e)}")
             raise e
+
+    def add_subtitles_to_clip(self, clip, text):
+        """Burn subtitles using PIL/Numpy instead of ImageMagick"""
+        from PIL import ImageDraw, ImageFont
+        
+        def make_frame(get_frame, t):
+            frame = get_frame(t)
+            img = Image.fromarray(frame)
+            draw = ImageDraw.Draw(img)
+            
+            # Simple subtitle box at bottom
+            w, h = img.size
+            margin = 40
+            # Try to load a font, fallback to default
+            try:
+                font = ImageFont.truetype("arial.ttf", 30)
+            except:
+                font = ImageFont.load_default()
+            
+            # Draw text with shadow/outline
+            text_w = draw.textlength(text, font=font)
+            pos = ((w - text_w) // 2, h - margin - 30)
+            
+            # Outline
+            for offset in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
+                draw.text((pos[0]+offset[0], pos[1]+offset[1]), text, font=font, fill="black")
+            # Text
+            draw.text(pos, text, font=font, fill="white")
+            
+            return np.array(img)
+
+        return clip.fl(lambda gf, t: make_frame(gf, t))
+
+    def unload_all_models(self):
+        """Free up GPU memory"""
+        self.video_pipe = None
+        self.tts = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            import gc
+            gc.collect()
 
 renderer = MovieRenderer()

@@ -5,13 +5,3 @@ pydantic-settings
 aiogram
 aiohttp
 python-dotenv
-openai
-torch
-diffusers
-transformers
-accelerate
-pillow
-moviepy
-pydub
-ffmpeg-python
-pyngrok
