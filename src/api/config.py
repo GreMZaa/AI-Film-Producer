@@ -15,10 +15,26 @@ class Settings(BaseSettings):
     # Models Configuration
     LLM_MODEL: str = "llama3.1"
     OLLAMA_BASE_URL: str = "http://localhost:11434/v1"
-    IMAGE_MODEL: str = "black-forest-labs/FLUX.1-schnell"
-    VIDEO_MODEL: str = "stabilityai/stable-video-diffusion-img2vid-xt"
-    TTS_MODEL: str = "suno/bark"
+    COMFYUI_URL: str = "http://localhost:8188"
+    IMAGE_MODEL: str = "flux1-schnell-Q4_K_S.gguf"
     IMAGE_STEPS: int = 4
+    VIDEO_MODEL: str = "svd_xt_1_1.safetensors"
+    VIDEO_FPS: int = 24
+    
+    # Paths for Phase 4
+    WAV2LIP_PATH: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "local_server", "wav2lip")
+    WAV2LIP_CHECKPOINT: str = os.path.join(WAV2LIP_PATH, "checkpoints", "wav2lip_gan.pth")
+    FACE_DETECTION_CHECKPOINT: str = os.path.join(WAV2LIP_PATH, "checkpoints", "s3fd.pth")
+
+    # Ngrok Configuration
+    USE_NGROK: bool = False
+    NGROK_AUTHTOKEN: str = ""
+    NGROK_DOMAIN: str = ""
+    
+    # Phase 5: Economy & WebApp
+    PAYMENT_PROVIDER_TOKEN: str = "" # To be filled in .env
+    DATABASE_URL: str = "sqlite:///./data/ai_producer.db"
+    WEBAPP_URL: str = "" # Will be set to LOCAL_SERVER_URL + /webapp in main.py
     
     class Config:
         env_file = ".env"

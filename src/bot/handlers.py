@@ -3,8 +3,9 @@ from aiogram import types, Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from src.bot.bot import DIRECTOR_QUOTES, DirectorStates
+from src.bot.bot import DIRECTOR_QUOTES, DirectorStates, bot
 from src.api.config import settings
+from src.api.db import get_user, create_or_update_user, set_user_premium, log_transaction
 
 router = Router()
 
@@ -16,11 +17,30 @@ def get_approval_keyboard():
     )
     return builder.as_markup()
 
-def get_scene_keyboard(scene_id: int):
+def get_scene_keyboard(scene_id: int, image_url: str):
     builder = InlineKeyboardBuilder()
+    
+    # URL for WebApp: base_url/webapp?image_url=...&scene_id=...
+    webapp_url = f"{settings.LOCAL_SERVER_URL}/webapp"
+    # Note: Telegram WebApp handles query params better if passed via the button
+    
+    builder.row(
+        types.InlineKeyboardButton(
+            text="🖌 Редактировать (TMA)", 
+            web_app=types.WebAppInfo(url=f"{webapp_url}?image_url={image_url}&scene_id={scene_id}")
+        )
+    )
     builder.row(
         types.InlineKeyboardButton(text="🔄 Перегенерировать", callback_data=f"regenerate_scene_{scene_id}"),
         types.InlineKeyboardButton(text="✅ Ок", callback_data=f"approve_scene_{scene_id}")
+    )
+    return builder.as_markup()
+
+def get_upgrade_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        types.InlineKeyboardButton(text="📼 Bootleg (199 Stars)", callback_data="buy_bootleg"),
+        types.InlineKeyboardButton(text="🎬 Indie Premiere (499 Stars)", callback_data="buy_indie")
     )
     return builder.as_markup()
 
@@ -114,7 +134,7 @@ async def approve_script(callback: types.CallbackQuery, state: FSMContext):
                             photo=img_data["image_url"],
                             caption=f"🎬 Сцена {scene['scene_id']}\n_{scene['description']}_",
                             parse_mode="Markdown",
-                            reply_markup=get_scene_keyboard(scene["scene_id"])
+                            reply_markup=get_scene_keyboard(scene["scene_id"], img_data["image_url"])
                         )
                     else:
                         await callback.message.answer(f"❌ Не удалось нарисовать сцену {scene['scene_id']}")
@@ -128,14 +148,19 @@ async def approve_script(callback: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("regenerate_scene_"))
 async def regenerate_scene(callback: types.CallbackQuery, state: FSMContext):
     scene_id = int(callback.data.split("_")[-1])
-    await callback.answer("Переделываю...")
+    
+    # Remove buttons while processing
+    await callback.message.edit_reply_markup(reply_markup=None)
+    
+    status_msg = await callback.message.answer(f"🔄 **Режиссер:** «Хм, этот кадр — дешевка. Давай попробуем еще раз...» (Сцена {scene_id})")
+    await callback.answer()
     
     data = await state.get_data()
     script = data.get("current_script")
     
     scene_data = next((s for s in script["scenes"] if s["scene_id"] == scene_id), None)
     if not scene_data:
-        await callback.message.answer("Не нашел данных этой сцены.")
+        await status_msg.edit_text("❌ Данные сцены потеряны. Режиссер в ярости.")
         return
 
     async with aiohttp.ClientSession() as session:
@@ -153,19 +178,22 @@ async def regenerate_scene(callback: types.CallbackQuery, state: FSMContext):
                     # Update image URL in state
                     current_data = await state.get_data()
                     storyboard = current_data.get("storyboard", {})
-                    storyboard[str(scene_id)]["image_url"] = img_data["image_url"]
-                    await state.update_data(storyboard=storyboard)
-
+                    if str(scene_id) in storyboard:
+                        storyboard[str(scene_id)]["image_url"] = img_data["image_url"]
+                        await state.update_data(storyboard=storyboard)
+                    
+                    await status_msg.delete()
                     await callback.message.answer_photo(
                         photo=img_data["image_url"],
-                        caption=f"🔄 Новый вариант: Сцена {scene_id}\n_{scene_data['description']}_",
+                        caption=f"🎬 **Новый вариант: Сцена {scene_id}**\n_{scene_data['description']}_",
                         parse_mode="Markdown",
-                        reply_markup=get_scene_keyboard(scene_id)
+                        reply_markup=get_scene_keyboard(scene_id, img_data["image_url"])
                     )
                 else:
-                    await callback.message.answer(f"❌ Ошибка при перегенерации.")
+                    err = await resp.json()
+                    await status_msg.edit_text(f"❌ Камера сломалась: {err.get('detail', 'Unknown error')}")
         except Exception as e:
-            await callback.message.answer(f"⚠️ Ошибка: {str(e)}")
+            await status_msg.edit_text(f"⚠️ Ошибка связи с гаражом: {str(e)}")
 
 @router.callback_query(F.data.startswith("approve_scene_"))
 async def approve_single_scene(callback: types.CallbackQuery):
@@ -223,3 +251,84 @@ async def reject_script(callback: types.CallbackQuery, state: FSMContext):
 @router.message(Command("help"))
 async def cmd_help(message: types.Message):
     await message.answer(DIRECTOR_QUOTES["help"])
+
+# --- Phase 5: Economy & Payments ---
+
+@router.message(Command("upgrade"))
+async def cmd_upgrade(message: types.Message):
+    create_or_update_user(message.from_user.id, message.from_user.username)
+    user = get_user(message.from_user.id)
+    
+    if user["is_premium"]:
+        await message.answer(f"🕶 Ты уже в клубе, бро. Твой статус: **{user['subscription_type'].upper()}**.", parse_mode="Markdown")
+        return
+
+    upgrade_text = (
+        "🍿 **ВЫБЕРИ СВОЙ БИЛЕТ В БОЛЬШОЕ КИНО**\n\n"
+        "📼 **BOOTLEG (199 Stars)**\n"
+        "• Приоритетная очередь в гараже\n"
+        "• Отсутствие ватермарок (когда мы их добавим)\n"
+        "• Уважение режиссера\n\n"
+        "🎬 **INDIE PREMIERE (499 Stars)**\n"
+        "• Всё из Bootleg\n"
+        "• Безлимитный Inpainting в TMA\n"
+        "• 4K апскейл (в планах)\n"
+        "• Твое имя в титрах (наверное)\n\n"
+        "Выбирай, пока я не передумал."
+    )
+    await message.answer(upgrade_text, parse_mode="Markdown", reply_markup=get_upgrade_keyboard())
+
+@router.callback_query(F.data == "buy_bootleg")
+async def buy_bootleg(callback: types.CallbackQuery):
+    await bot.send_invoice(
+        callback.from_user.id,
+        title="Bootleg Subscription",
+        description="Приоритетный рендер и статус инди-продюсера.",
+        payload="subscription_bootleg",
+        provider_token=settings.PAYMENT_PROVIDER_TOKEN,
+        currency="XTR", # Telegram Stars
+        prices=[types.LabeledPrice(label="Bootleg", amount=199)]
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "buy_indie")
+async def buy_indie(callback: types.CallbackQuery):
+    await bot.send_invoice(
+        callback.from_user.id,
+        title="Indie Premiere Subscription",
+        description="Полный доступ, безлимитные правки и статус легенды.",
+        payload="subscription_indie",
+        provider_token=settings.PAYMENT_PROVIDER_TOKEN,
+        currency="XTR", # Telegram Stars
+        prices=[types.LabeledPrice(label="Indie Premiere", amount=499)]
+    )
+    await callback.answer()
+
+@router.pre_checkout_query()
+async def process_pre_checkout(pre_checkout_query: types.PreCheckoutQuery):
+    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+@router.message(F.successful_payment)
+async def process_successful_payment(message: types.Message):
+    payload = message.successful_payment.invoice_payload
+    user_id = message.from_user.id
+    
+    sub_type = "bootleg" if "bootleg" in payload else "indie"
+    priority = 1 if sub_type == "bootleg" else 2
+    
+    # Update DB
+    set_user_premium(user_id, sub_type, priority)
+    log_transaction(
+        user_id, 
+        message.successful_payment.total_amount / 100 if message.successful_payment.currency != "XTR" else message.successful_payment.total_amount,
+        message.successful_payment.currency,
+        "success",
+        message.successful_payment.telegram_payment_charge_id
+    )
+    
+    await message.answer(
+        f"🎊 **ОПЛАТА ПРОШЛА!**\n\n"
+        f"Теперь ты официально продюсер со статусом **{sub_type.upper()}**. "
+        "Иди и твори, пока запал не прошел. Камера ждет!",
+        parse_mode="Markdown"
+    )

@@ -5,3 +5,7 @@ pydantic-settings
 aiogram
 aiohttp
 python-dotenv
+websocket-client
+requests
+pyngrok
+openai

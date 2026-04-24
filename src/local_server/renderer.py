@@ -2,16 +2,28 @@ import os
 import torch
 import uuid
 import logging
-from diffusers import StableVideoDiffusionPipeline
-from moviepy.editor import ImageClip, VideoFileClip, AudioFileClip, concatenate_videoclips, TextClip, CompositeVideoClip
+# from diffusers import StableVideoDiffusionPipeline # Removed to avoid transformers conflict, using ComfyUI instead
+
+from moviepy import ImageClip, VideoFileClip, AudioFileClip, concatenate_videoclips, TextClip, CompositeVideoClip, vfx
 from src.api.config import settings
 from PIL import Image
 from pydub import AudioSegment
 import numpy as np
+import transformers.utils.import_utils as import_utils
+if not hasattr(import_utils, "is_torchcodec_available"):
+    import_utils.is_torchcodec_available = lambda: False
+if not hasattr(import_utils, "is_torch_greater_or_equal"):
+    import torch
+    from packaging import version
+    import_utils.is_torch_greater_or_equal = lambda v: version.parse(torch.__version__) >= version.parse(v)
+
 try:
     from TTS.api import TTS
 except ImportError:
     TTS = None
+
+import subprocess
+from src.local_server.comfy_client import comfy_client
 
 logger = logging.getLogger(__name__)
 
@@ -19,64 +31,37 @@ class MovieRenderer:
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.video_pipe = None
+
         self.tts = None
         # Models for Phase 4
 
-    def load_video_model(self):
-        if self.video_pipe is None:
-            logger.info("Loading SVD model...")
-            self.video_pipe = StableVideoDiffusionPipeline.from_pretrained(
-                settings.VIDEO_MODEL, 
-                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-                variant="fp16" if self.device == "cuda" else None
-            ).to(self.device)
-            # Enable memory optimizations
-            self.video_pipe.enable_model_cpu_offload() # Better for low VRAM
-            logger.info("SVD model loaded.")
+    # Removed load_video_model as we use ComfyUI for SVD
+
 
     def generate_scene_video(self, image_path: str, scene_id: int):
-        """Phase 4.1: Animate the image using SVD"""
-        self.load_video_model()
+        """Phase 4.1: Animate the image using ComfyUI (SVD)"""
+        logger.info(f"Animating scene {scene_id} using ComfyUI...")
         
-        # Ensure path is correct
-        if not os.path.exists(image_path):
-            # Fallback if image_path is a relative path or filename
-            potential_path = os.path.join(settings.STORYBOARD_DIR, os.path.basename(image_path))
-            if os.path.exists(potential_path):
-                image_path = potential_path
-            else:
-                logger.error(f"Image not found at {image_path}")
-                raise FileNotFoundError(f"Image not found: {image_path}")
+        output_filename = f"scene_{scene_id}_{uuid.uuid4().hex[:8]}_svd.mp4"
+        output_path = os.path.join(settings.VIDEO_DIR, output_filename)
+        
+        try:
+            # Ensure path is correct
+            if not os.path.exists(image_path):
+                potential_path = os.path.join(settings.STORYBOARD_DIR, os.path.basename(image_path))
+                if os.path.exists(potential_path):
+                    image_path = potential_path
+                else:
+                    logger.error(f"Image not found at {image_path}")
+                    raise FileNotFoundError(f"Image not found: {image_path}")
 
-        image = Image.open(image_path).convert("RGB")
-        image = image.resize((1024, 576)) # SVD standard resolution
-        
-        logger.info(f"Animating scene {scene_id}...")
-        generator = torch.manual_seed(42)
-        # Low steps for faster testing, increase for quality
-        with torch.no_grad():
-            output = self.video_pipe(
-                image, 
-                decode_chunk_size=8, 
-                generator=generator,
-                num_frames=14, # Standard SVD short clip
-                motion_bucket_id=127,
-                noise_aug_strength=0.1
-            )
-            frames = output.frames[0]
-        
-        output_path = os.path.join(settings.VIDEO_DIR, f"scene_{scene_id}_{uuid.uuid4().hex[:8]}.mp4")
-        
-        # Save frames as video using MoviePy
-        import numpy as np
-        from moviepy.editor import ImageSequenceClip
-        
-        # Convert PIL images to numpy arrays
-        video_frames = [np.array(f) for f in frames]
-        clip = ImageSequenceClip(video_frames, fps=7)
-        clip.write_videofile(output_path, codec="libx264", audio=False, logger=None)
-        
-        return output_path
+            result = comfy_client.generate_video_sync(image_path, output_path)
+            if not result:
+                raise Exception("ComfyUI video generation failed")
+            return output_path
+        except Exception as e:
+            logger.error(f"SVD Animation failed: {e}")
+            raise e
 
     def load_tts_model(self):
         if self.tts is None and TTS is not None:
@@ -101,7 +86,7 @@ class MovieRenderer:
         
         return output_path
 
-    def assemble_final_movie(self, scenes_data: list, user_id: int):
+    def assemble_final_movie(self, scenes_data: list, user_id: int, is_premium: bool = False):
         """Phase 4.4: Combine everything with FFmpeg/MoviePy"""
         logger.info(f"Starting final assembly for user {user_id}")
         clips = []
@@ -120,21 +105,28 @@ class MovieRenderer:
                 # 2. Generate Video (Animation)
                 video_path = self.generate_scene_video(local_image_path, scene['scene_id'])
                 
-                # 3. Optional Lipsync (If weights exist)
-                # For now, we'll just use the raw video + audio
+                # 3. Lip-Sync (Wav2Lip)
+                final_scene_video = video_path
+                if audio_path and os.path.exists(audio_path):
+                    logger.info(f"Running Lip-Sync for scene {scene['scene_id']}...")
+                    synced_video_path = os.path.join(settings.VIDEO_DIR, f"scene_{scene['scene_id']}_synced.mp4")
+                    try:
+                        final_scene_video = self.sync_lips(video_path, audio_path, synced_video_path)
+                    except Exception as e:
+                        logger.error(f"Lip-sync failed for scene {scene['scene_id']}: {e}. Using silent video.")
                 
-                clip = VideoFileClip(video_path)
+                clip = VideoFileClip(final_scene_video)
                 
-                if audio_path:
+                # We need to ensure the audio is attached if sync_lips didn't already (it should have)
+                # But MoviePy sometimes needs a refresh of the clip object
+                if audio_path and os.path.exists(audio_path):
                     audio_clip = AudioFileClip(audio_path)
                     if audio_clip.duration > clip.duration:
-                        clip = clip.loop(duration=audio_clip.duration)
-                    clip = clip.set_audio(audio_clip)
+                        clip = clip.with_effects([vfx.Loop(duration=audio_clip.duration)])
+                    clip = clip.with_audio(audio_clip)
                 
-                # 4. Burn Subtitles (Fallback for ImageMagick)
+                # 4. Burn Subtitles
                 if scene.get('dialogue') and scene['dialogue'].lower() != "silent":
-                    # We create a simple black bar with text using a custom function
-                    # instead of TextClip which requires ImageMagick
                     clip = self.add_subtitles_to_clip(clip, scene['dialogue'])
                     
                 clips.append(clip)
@@ -144,20 +136,14 @@ class MovieRenderer:
 
             final_clip = concatenate_videoclips(clips, method="compose")
             
-            # Phase 4.4: Add watermark
-            watermark = (TextClip("AI PRODUCER: TRIAL", fontsize=40, color='white', 
-                                 font='Arial', stroke_color='black', stroke_width=2)
-                        .set_duration(final_clip.duration)
-                        .set_position(('right', 'bottom'))
-                        .set_opacity(0.4)
-                        .margin(right=20, bottom=20, opacity=0))
-            
-            result = CompositeVideoClip([final_clip, watermark])
+            # Phase 5: Dynamic Watermark
+            watermark_text = "AI PRODUCER: DIRECTOR EDITION" if is_premium else "AI PRODUCER: TRIAL"
+            final_clip = self.add_watermark_to_clip(final_clip, watermark_text)
             
             output_filename = f"final_movie_{user_id}_{uuid.uuid4().hex[:8]}.mp4"
             output_path = os.path.join(settings.VIDEO_DIR, output_filename)
             
-            result.write_videofile(output_path, codec="libx264", audio_codec="aac") 
+            final_clip.write_videofile(output_path, codec="libx264", audio_codec="aac") 
             
             return output_path
             
@@ -195,7 +181,60 @@ class MovieRenderer:
             
             return np.array(img)
 
-        return clip.fl(lambda gf, t: make_frame(gf, t))
+        return clip.transform(make_frame)
+
+    def add_watermark_to_clip(self, clip, text):
+        """Add watermark using PIL/Numpy"""
+        from PIL import ImageDraw, ImageFont
+        
+        def make_frame(get_frame, t):
+            frame = get_frame(t)
+            img = Image.fromarray(frame)
+            draw = ImageDraw.Draw(img)
+            
+            w, h = img.size
+            try:
+                font = ImageFont.truetype("arial.ttf", 40)
+            except:
+                font = ImageFont.load_default()
+            
+            text_w = draw.textlength(text, font=font)
+            # Position: bottom right
+            pos = (w - text_w - 20, h - 60)
+            
+            # semi-transparent white with black outline
+            for offset in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
+                draw.text((pos[0]+offset[0], pos[1]+offset[1]), text, font=font, fill=(0, 0, 0, 100))
+            draw.text(pos, text, font=font, fill=(255, 255, 255, 100))
+            
+            return np.array(img)
+
+        return clip.transform(make_frame)
+
+    def sync_lips(self, video_path: str, audio_path: str, output_path: str):
+        """Phase 4.3: Run Wav2Lip inference"""
+        inference_script = os.path.join(settings.WAV2LIP_PATH, "inference.py")
+        
+        cmd = [
+            "python", inference_script,
+            "--checkpoint_path", settings.WAV2LIP_CHECKPOINT,
+            "--face", video_path,
+            "--audio", audio_path,
+            "--outfile", output_path,
+            "--pads", "0", "20", "0", "0", # Better for chin detection
+            "--nosmooth"
+        ]
+        
+        logger.info(f"Executing Wav2Lip: {' '.join(cmd)}")
+        
+        # We run this in the same environment
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=settings.WAV2LIP_PATH)
+        
+        if result.returncode != 0:
+            logger.error(f"Wav2Lip error: {result.stderr}")
+            raise Exception(f"Wav2Lip failed: {result.stderr}")
+            
+        return output_path
 
     def unload_all_models(self):
         """Free up GPU memory"""
