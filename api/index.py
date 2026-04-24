@@ -48,13 +48,14 @@ try:
             logger.error(f"Webhook error: {e}")
             return {"status": "error", "message": str(e)}
 
-except Exception as e:
-    logger.error(f"Initialization error: {e}")
+except Exception as ex:
+    err = str(ex)
+    logger.error(f"Initialization error: {err}")
     
     @app.get("/{path:path}")
     async def error_handler(path: str):
         return {
             "error": "Initialization failed",
-            "details": str(e),
-            "hint": "Check if all dependencies are in api/requirements.txt and src/__init__.py exists"
+            "details": err,
+            "message": "Check Vercel environment variables (BOT_TOKEN) and logs."
         }
