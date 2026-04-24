@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     # Phase 5: Economy & WebApp
     PAYMENT_PROVIDER_TOKEN: str = "" # To be filled in .env
     DATABASE_URL: str = "sqlite:///./data/ai_producer.db"
+    
+    @property
+    def database_url_resolved(self) -> str:
+        if os.environ.get("VERCEL"):
+            return "sqlite:////tmp/ai_producer.db"
+        return self.DATABASE_URL
+
     WEBAPP_URL: str = "" # Will be set to LOCAL_SERVER_URL + /webapp in main.py
     
     class Config:
