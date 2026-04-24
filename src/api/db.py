@@ -4,9 +4,19 @@ from datetime import datetime
 from src.api.config import settings
 
 def get_db_connection():
-    db_path = settings.DATABASE_URL.replace("sqlite:///", "")
-    # Ensure directory exists
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    db_url = settings.database_url_resolved
+    db_path = db_url.replace("sqlite:///", "")
+    
+    # Ensure directory exists (only if not in read-only environment or if it's /tmp)
+    db_dir = os.path.dirname(db_path)
+    if db_dir and not os.path.exists(db_dir):
+        try:
+            os.makedirs(db_dir, exist_ok=True)
+        except Exception as e:
+            # On Vercel, we might not be able to create directories outside /tmp
+            if not os.environ.get("VERCEL"):
+                raise e
+            
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
