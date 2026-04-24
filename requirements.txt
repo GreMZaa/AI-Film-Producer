@@ -5,6 +5,7 @@ pydantic-settings
 aiogram
 aiohttp
 python-dotenv
+psutil
 websocket-client
 requests
 pyngrok

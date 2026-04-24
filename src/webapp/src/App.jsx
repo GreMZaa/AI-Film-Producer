@@ -16,6 +16,11 @@ function App() {
     const params = new URLSearchParams(window.location.search);
     const img = params.get('image_url');
     const sid = params.get('scene_id');
+    const uid = params.get('user_id');
+    
+    if (img) setImageUrl(img);
+    if (sid) setSceneId(sid);
+    
     if (uid) {
       setUserId(parseInt(uid));
       fetchUserStatus(parseInt(uid));

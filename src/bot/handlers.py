@@ -88,9 +88,9 @@ async def process_brief(message: types.Message, state: FSMContext):
                     await message.answer(response_text, parse_mode="Markdown", reply_markup=get_approval_keyboard())
                     await state.set_state(DirectorStates.ScriptApproval)
                 else:
-                    await message.answer(DIRECTOR_QUOTES["server_error"])
+                    await message.answer("🚧 Режиссер ушел на перекур! (Сервер вернул ошибку). Попробуйте позже.")
         except Exception as e:
-            await message.answer(f"⚠️ Ошибка связи с гаражом: {str(e)}")
+            await message.answer("🚪 Гараж сейчас закрыт! Пожалуйста, запустите GarageHollywood.exe на вашем ПК и убедитесь, что Ngrok активен.")
 
 @router.callback_query(DirectorStates.ScriptApproval, F.data == "approve_script")
 async def approve_script(callback: types.CallbackQuery, state: FSMContext):

@@ -19,5 +19,10 @@ data/
 .idea/
 
 # Tools
-scratch/busybox.exe
+scratch/
+build/
+dist/
+node_modules/
+src/webapp/dist/
+.vercel/
 

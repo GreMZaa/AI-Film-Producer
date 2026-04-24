@@ -43,7 +43,7 @@ class MovieRenderer:
         logger.info(f"Animating scene {scene_id} using ComfyUI...")
         
         output_filename = f"scene_{scene_id}_{uuid.uuid4().hex[:8]}_svd.mp4"
-        output_path = os.path.join(settings.VIDEO_DIR, output_filename)
+        output_path = os.path.join(settings.TEMP_DIR, output_filename)
         
         try:
             # Ensure path is correct
@@ -77,7 +77,7 @@ class MovieRenderer:
             logger.warning("TTS library not installed. Skipping audio.")
             return None
             
-        output_path = os.path.join(settings.AUDIO_DIR, f"scene_{scene_id}_{uuid.uuid4().hex[:8]}.wav")
+        output_path = os.path.join(settings.TEMP_DIR, f"scene_{scene_id}_{uuid.uuid4().hex[:8]}.wav")
         
         logger.info(f"Generating audio for scene {scene_id}...")
         # Bark supports voice presets. For a sarcastic producer, we might want a specific one.
@@ -109,7 +109,7 @@ class MovieRenderer:
                 final_scene_video = video_path
                 if audio_path and os.path.exists(audio_path):
                     logger.info(f"Running Lip-Sync for scene {scene['scene_id']}...")
-                    synced_video_path = os.path.join(settings.VIDEO_DIR, f"scene_{scene['scene_id']}_synced.mp4")
+                    synced_video_path = os.path.join(settings.TEMP_DIR, f"scene_{scene['scene_id']}_synced.mp4")
                     try:
                         final_scene_video = self.sync_lips(video_path, audio_path, synced_video_path)
                     except Exception as e:
@@ -136,9 +136,19 @@ class MovieRenderer:
 
             final_clip = concatenate_videoclips(clips, method="compose")
             
-            # Phase 5: Dynamic Watermark
-            watermark_text = "AI PRODUCER: DIRECTOR EDITION" if is_premium else "AI PRODUCER: TRIAL"
-            final_clip = self.add_watermark_to_clip(final_clip, watermark_text)
+            # Phase 5: Dynamic Watermark & Credits
+            if not is_premium:
+                watermark_text = "AI PRODUCER: TRIAL"
+                final_clip = self.add_watermark_to_clip(final_clip, watermark_text)
+            else:
+                # Add a credits scene at the end for Indie Producers
+                from src.api.db import get_user
+                user = get_user(user_id)
+                username = user["username"] if user and user["username"] else f"Producer_{user_id}"
+                
+                credits_text = f"DIRECTED BY\n{username.upper()}"
+                credits_clip = self.create_credits_clip(final_clip.size, credits_text, duration=3)
+                final_clip = concatenate_videoclips([final_clip, credits_clip], method="compose")
             
             output_filename = f"final_movie_{user_id}_{uuid.uuid4().hex[:8]}.mp4"
             output_path = os.path.join(settings.VIDEO_DIR, output_filename)
@@ -157,31 +167,35 @@ class MovieRenderer:
         
         def make_frame(get_frame, t):
             frame = get_frame(t)
+            # Ensure frame is in uint8 format for PIL
+            if frame.dtype != np.uint8:
+                frame = (frame * 255).astype(np.uint8) if frame.max() <= 1.1 else frame.astype(np.uint8)
             img = Image.fromarray(frame)
-            draw = ImageDraw.Draw(img)
+            # Create an overlay for transparency
+            overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
             
-            # Simple subtitle box at bottom
             w, h = img.size
             margin = 40
-            # Try to load a font, fallback to default
             try:
                 font = ImageFont.truetype("arial.ttf", 30)
             except:
                 font = ImageFont.load_default()
             
-            # Draw text with shadow/outline
             text_w = draw.textlength(text, font=font)
             pos = ((w - text_w) // 2, h - margin - 30)
             
-            # Outline
+            # Outline (black)
             for offset in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
-                draw.text((pos[0]+offset[0], pos[1]+offset[1]), text, font=font, fill="black")
-            # Text
-            draw.text(pos, text, font=font, fill="white")
+                draw.text((pos[0]+offset[0], pos[1]+offset[1]), text, font=font, fill=(0, 0, 0, 200))
+            # Text (white)
+            draw.text(pos, text, font=font, fill=(255, 255, 255, 255))
             
+            # Composite overlay onto the original frame
+            img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
             return np.array(img)
 
-        return clip.transform(make_frame)
+        return clip.with_transform(make_frame)
 
     def add_watermark_to_clip(self, clip, text):
         """Add watermark using PIL/Numpy"""
@@ -189,8 +203,13 @@ class MovieRenderer:
         
         def make_frame(get_frame, t):
             frame = get_frame(t)
+            # Ensure frame is in uint8 format for PIL
+            if frame.dtype != np.uint8:
+                frame = (frame * 255).astype(np.uint8) if frame.max() <= 1.1 else frame.astype(np.uint8)
             img = Image.fromarray(frame)
-            draw = ImageDraw.Draw(img)
+            # Create an overlay for transparency
+            overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
             
             w, h = img.size
             try:
@@ -202,14 +221,17 @@ class MovieRenderer:
             # Position: bottom right
             pos = (w - text_w - 20, h - 60)
             
-            # semi-transparent white with black outline
+            # Semi-transparent black outline
             for offset in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
-                draw.text((pos[0]+offset[0], pos[1]+offset[1]), text, font=font, fill=(0, 0, 0, 100))
-            draw.text(pos, text, font=font, fill=(255, 255, 255, 100))
+                draw.text((pos[0]+offset[0], pos[1]+offset[1]), text, font=font, fill=(0, 0, 0, 150))
+            # Semi-transparent white text
+            draw.text(pos, text, font=font, fill=(255, 255, 255, 150))
             
+            # Composite overlay onto the original frame
+            img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
             return np.array(img)
 
-        return clip.transform(make_frame)
+        return clip.with_transform(make_frame)
 
     def sync_lips(self, video_path: str, audio_path: str, output_path: str):
         """Phase 4.3: Run Wav2Lip inference"""
@@ -235,6 +257,40 @@ class MovieRenderer:
             raise Exception(f"Wav2Lip failed: {result.stderr}")
             
         return output_path
+
+    def create_credits_clip(self, size, text, duration=3):
+        """Create a black screen with centered credits text using PIL"""
+        from PIL import ImageDraw, ImageFont
+        import numpy as np
+        
+        w, h = size
+        
+        def make_frame(t):
+            img = Image.new('RGB', (w, h), color=(0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            
+            try:
+                font = ImageFont.truetype("arial.ttf", 60)
+            except:
+                font = ImageFont.load_default()
+            
+            # Multi-line text handling
+            lines = text.split("\n")
+            # Calculate total height of the text block
+            line_heights = [draw.textbbox((0, 0), line, font=font)[3] - draw.textbbox((0, 0), line, font=font)[1] for line in lines]
+            total_height = sum(line_heights) + (len(lines) - 1) * 20
+            
+            current_y = (h - total_height) // 2
+            for i, line in enumerate(lines):
+                text_w = draw.textlength(line, font=font)
+                pos = ((w - text_w) // 2, current_y)
+                draw.text(pos, line, font=font, fill=(255, 255, 255))
+                current_y += line_heights[i] + 20
+                
+            return np.array(img)
+            
+        from moviepy import VideoClip
+        return VideoClip(make_frame, duration=duration)
 
     def unload_all_models(self):
         """Free up GPU memory"""

@@ -181,7 +181,7 @@ async def inpaint_image(request: InpaintingRequest):
         local_image_path = os.path.join(settings.STORYBOARD_DIR, img_filename)
         
         mask_filename = f"mask_{uuid.uuid4().hex[:8]}.png"
-        mask_path = os.path.join(settings.DATA_DIR, mask_filename)
+        mask_path = os.path.join(settings.TEMP_DIR, mask_filename)
         
         # 2. Decode mask
         mask_data = base64.b64decode(request.mask_base64.split(",")[-1])
@@ -231,6 +231,8 @@ async def start_render(request: RenderRequest):
         user = get_user(request.user_id)
         is_premium = bool(user["is_premium"]) if user else False
         
+        # Convert Pydantic models to dictionaries for the renderer
+        scenes_data = [s.dict() for s in request.scenes]
         output_path = renderer.assemble_final_movie(scenes_data, request.user_id, is_premium=is_premium)
         filename = os.path.basename(output_path)
         

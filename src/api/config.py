@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     STORYBOARD_DIR: str = os.path.join(BASE_DIR, "outputs", "images")
     VIDEO_DIR: str = os.path.join(BASE_DIR, "outputs", "videos")
     AUDIO_DIR: str = os.path.join(BASE_DIR, "outputs", "audio")
+    TEMP_DIR: str = os.path.join(BASE_DIR, "outputs", "temp")
     
     # Models Configuration
     LLM_MODEL: str = "llama3.1"
@@ -47,3 +48,4 @@ if not os.environ.get("VERCEL"):
     os.makedirs(settings.STORYBOARD_DIR, exist_ok=True)
     os.makedirs(settings.VIDEO_DIR, exist_ok=True)
     os.makedirs(settings.AUDIO_DIR, exist_ok=True)
+    os.makedirs(settings.TEMP_DIR, exist_ok=True)
